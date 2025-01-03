@@ -1,24 +1,54 @@
+import unittest
+import asyncio
 from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
 from pythclient.pythclient import PythClient
-import asyncio
+from aurora.core.blockchain_engine import AuroraEngine
 
-async def test_imports():
-    """Test that all required imports are working."""
-    try:
-        # Test Solana imports
-        client = AsyncClient("https://api.mainnet-beta.solana.com")
+class TestBlockchainSetup(unittest.TestCase):
+    """Test cases for blockchain setup and basic functionality."""
+    
+    def setUp(self):
+        """Set up test environment before each test."""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+    
+    def tearDown(self):
+        """Clean up after each test."""
+        self.loop.close()
+    
+    def test_solana_imports(self):
+        """Test that Solana imports are working."""
+        async def _test():
+            client = AsyncClient("https://api.mainnet-beta.solana.com")
+            keypair = Keypair()
+            self.assertIsNotNone(client)
+            self.assertIsNotNone(keypair)
+            return True
+        
+        result = self.loop.run_until_complete(_test())
+        self.assertTrue(result)
+    
+    def test_pyth_imports(self):
+        """Test that Pyth Network imports are working."""
+        async def _test():
+            connection = AsyncClient("https://api.mainnet-beta.solana.com")
+            pyth_client = PythClient(connection)
+            self.assertIsNotNone(pyth_client)
+            return True
+            
+        result = self.loop.run_until_complete(_test())
+        self.assertTrue(result)
+    
+    def test_aurora_engine_init(self):
+        """Test AuroraEngine initialization."""
         keypair = Keypair()
-        print("Solana imports successful")
-        
-        # Test Pyth Network imports
-        pyth_client = PythClient("https://api.mainnet-beta.solana.com")
-        print("Pyth Network imports successful")
-        
-        return True
-    except Exception as e:
-        print(f"Import test failed: {str(e)}")
-        return False
+        engine = AuroraEngine(
+            private_key=keypair.to_base58_string(),
+            rpc_url="https://api.mainnet-beta.solana.com",
+            openai_api_key="dummy-key-for-testing"
+        )
+        self.assertIsNotNone(engine)
 
-if __name__ == "__main__":
-    asyncio.run(test_imports())
+if __name__ == '__main__':
+    unittest.main()
