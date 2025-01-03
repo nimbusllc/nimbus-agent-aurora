@@ -83,4 +83,4 @@ Contributions are welcome! Please follow these steps:
 
 ## License
 
-MIT License - see LICENSE file for details
+GNU Affero General Public License - see LICENSE file for details
