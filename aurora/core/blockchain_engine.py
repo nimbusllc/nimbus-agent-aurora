@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Any
 from base58 import b58decode
 from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 from pythclient.pythclient import PythClient
 
 class Constants:
@@ -18,13 +19,13 @@ class Constants:
     }
 
 class AuroraEngine:
-    def setup(
+    def __init__(
         self,
         private_key: str,
         rpc_url: str,
         openai_api_key: str
     ):
-        """Set up Agent Aurora with provided authentication."""
+        """Initialize Agent Aurora with provided authentication."""
         self.keypair = Keypair.from_bytes(b58decode(private_key))
         self.client = AsyncClient(rpc_url)
         self.pyth_client = PythClient(rpc_url)
@@ -32,8 +33,29 @@ class AuroraEngine:
     async def get_token_balance(self, token_mint: str) -> float:
         """Get token balance for the current wallet."""
         try:
-            # TODO: Add token balance verification
-            return 0.0
+            from spl.token.client import Token
+            from solders.pubkey import Pubkey
+            
+            # Get token account
+            token = Token(
+                conn=self.client,
+                pubkey=Pubkey.from_string(token_mint),
+                program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+                payer=self.keypair
+            )
+            
+            # Get token account owned by this wallet
+            token_accounts = await token.get_accounts(owner=self.keypair.pubkey())
+            if not token_accounts:
+                return 0.0
+                
+            # Get balance of first account
+            balance = await token.get_balance(token_accounts[0].pubkey)
+            decimals = await token.get_mint_info()
+            
+            # Convert to float considering decimals
+            return float(balance.ui_amount_float)
+            
         except Exception as e:
             print(f"Failed to get token balance: {str(e)}")
             return 0.0
@@ -44,18 +66,49 @@ class AuroraEngine:
         to_token: str,
         amount: float
     ) -> bool:
-        """Execute a trade between two tokens using Jupiter or Raydium."""
+        """Execute a trade between two tokens using Jupiter."""
         try:
-            # TODO: Add trading logic using Jupiter/Raydium
-            # 1. Get pool info
-            # 2. Calculate price impact
-            # 3. Create and sign transaction
-            # 4. Send and confirm transaction
-            tx_signature = await self.client.send_transaction(
-                # Trading transaction logic here
-                None  # Placeholder
-            )
-            return bool(tx_signature)
+            import aiohttp
+            from solders.pubkey import Pubkey
+            from solders.instruction import Instruction
+            from solders.transaction import Transaction
+            
+            # Jupiter API endpoint for quote
+            JUPITER_QUOTE_API = "https://quote-api.jup.ag/v6/quote"
+            
+            # Get quote from Jupiter
+            params = {
+                "inputMint": from_token,
+                "outputMint": to_token,
+                "amount": str(int(amount * 1e6)),  # Convert to smallest unit
+                "slippageBps": 50  # 0.5% slippage
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(JUPITER_QUOTE_API, params=params) as response:
+                    quote = await response.json()
+                    
+            # Get transaction data from Jupiter
+            route_map = quote['routesInfos'][0]  # Get best route
+            tx_data = {
+                "route": route_map,
+                "userPublicKey": str(self.keypair.pubkey())
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{JUPITER_QUOTE_API}/swap", json=tx_data) as response:
+                    swap_data = await response.json()
+            
+            # Create and sign transaction
+            tx = Transaction.from_json(swap_data['transaction'])
+            tx.sign(self.keypair)
+            
+            # Send transaction
+            tx_signature = await self.client.send_transaction(tx)
+            await self.client.confirm_transaction(tx_signature)
+            
+            return True
+            
         except Exception as e:
             print(f"Trade execution failed: {str(e)}")
             return False
@@ -67,15 +120,60 @@ class AuroraEngine:
     ) -> bool:
         """Stake SOL tokens in a staking pool."""
         try:
-            # TODO: Add staking logic
-            # 1. Find stake pool
-            # 2. Create stake account
-            # 3. Delegate stake
-            tx_signature = await self.client.send_transaction(
-                # Staking transaction logic here
-                None  # Placeholder
+            from solders.pubkey import Pubkey
+            from solders.system_program import create_account, CreateAccountParams
+            from solders.stake.program import create_stake, CreateStakeParams
+            from solders.stake.state import Authorized, Lockup
+            from solders.transaction import Transaction
+            from solders.keypair import Keypair
+            
+            # Create stake account
+            stake_account = Keypair.generate()
+            stake_rent = await self.client.get_minimum_balance_for_rent_exemption(
+                200  # Stake account size
             )
-            return bool(tx_signature)
+            
+            # Build transaction
+            tx = Transaction()
+            
+            # Add create account instruction
+            tx.add(
+                create_account(
+                    CreateAccountParams(
+                        from_pubkey=self.keypair.pubkey(),
+                        to_pubkey=stake_account.pubkey(),
+                        lamports=stake_rent + int(amount * 1e9),  # Convert SOL to lamports
+                        space=200,
+                        owner=Pubkey.from_string("Stake11111111111111111111111111111111111111")
+                    )
+                )
+            )
+            
+            # Add initialize stake instruction
+            tx.add(
+                create_stake(
+                    CreateStakeParams(
+                        stake_pubkey=stake_account.pubkey(),
+                        authorized=Authorized(
+                            staker=self.keypair.pubkey(),
+                            withdrawer=self.keypair.pubkey()
+                        ),
+                        lockup=Lockup(
+                            unix_timestamp=0,  # No lockup
+                            epoch=0,
+                            custodian=Pubkey.default()
+                        )
+                    )
+                )
+            )
+            
+            # Sign and send transaction
+            tx.sign(self.keypair, stake_account)
+            tx_signature = await self.client.send_transaction(tx)
+            await self.client.confirm_transaction(tx_signature)
+            
+            return True
+            
         except Exception as e:
             print(f"Staking failed: {str(e)}")
             return False
@@ -86,20 +184,55 @@ class AuroraEngine:
         amount: float,
         duration: int
     ) -> bool:
-        """Lend assets using a lending protocol."""
+        """Lend assets using Solend protocol."""
         try:
-            # TODO: Add lending logic
-            # 1. Find lending pool
-            # 2. Calculate optimal amount
-            # 3. Execute deposit
-            tx_signature = await self.client.send_transaction(
-                # Lending transaction logic here
-                None  # Placeholder
+            from solders.pubkey import Pubkey
+            from solders.instruction import Instruction
+            from solders.transaction import Transaction
+            from spl.token.client import Token
+            
+            # Solend program ID
+            SOLEND_PROGRAM_ID = Pubkey.from_string("So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo")
+            
+            # Get lending pool for token
+            pool_address = await self._get_lending_pool(token)
+            if not pool_address:
+                raise ValueError(f"No lending pool found for token {token}")
+                
+            # Create deposit instruction
+            deposit_ix = Instruction(
+                program_id=SOLEND_PROGRAM_ID,
+                accounts=[
+                    {"pubkey": pool_address, "is_signer": False, "is_writable": True},
+                    {"pubkey": self.keypair.pubkey(), "is_signer": True, "is_writable": False},
+                    {"pubkey": Pubkey.from_string(token), "is_signer": False, "is_writable": True}
+                ],
+                data=bytes([1, *int(amount * 1e6).to_bytes(8, 'little')])  # Deposit instruction
             )
-            return bool(tx_signature)
+            
+            # Create transaction
+            tx = Transaction()
+            tx.add(deposit_ix)
+            
+            # Sign and send transaction
+            tx.sign(self.keypair)
+            tx_signature = await self.client.send_transaction(tx)
+            await self.client.confirm_transaction(tx_signature)
+            
+            return True
+            
         except Exception as e:
             print(f"Lending failed: {str(e)}")
             return False
+            
+    async def _get_lending_pool(self, token: str) -> Optional[Pubkey]:
+        """Helper method to find Solend lending pool for a token."""
+        # Mapping of known Solend pools (would be fetched from API in production)
+        POOLS = {
+            Constants.SOL_MINT: "8PbodeaosQP19SjYFqr1VfQgWGKhdqdEyMk3blk3wzc7",
+            Constants.USDC_MINT: "BgxfHJDzm44T7XG68MYKx7YisTjZu73tVovyZSjJMpmw"
+        }
+        return Pubkey.from_string(POOLS.get(token)) if token in POOLS else None
     
     # Smart contract deployment and management functions will be implemented here
     # These functions will handle:
